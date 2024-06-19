@@ -26,9 +26,18 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
         batch_size = 2 ** (batch_size).bit_length() // 2  # map batch_size to power of two
 
     input = copy.deepcopy(image)
+    # median = np.median(image[::4, ::4, :], axis=[0, 1])
+    # mad = np.median(np.abs(image[::4, ::4, :] - median), axis=[0, 1])
+    # _min = np.min(image, axis=(0, 1))[np.newaxis, np.newaxis, :]
 
-    median = np.median(image[::4, ::4, :], axis=[0, 1])
-    mad = np.median(np.abs(image[::4, ::4, :] - median), axis=[0, 1])
+    # image = image - _min + 1e-5
+
+    # image = np.log(image)
+
+    # _mean = np.mean(image, axis=(0, 1))
+    # _std = np.std(image, axis=(0, 1))
+    # image = (image - _mean) / _std * 0.1
+
     
     if "1.0.0" in ai_path or "1.1.0" in ai_path:
         model_threshold = 1.0
@@ -36,13 +45,13 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
         model_threshold = 10.0
 
     global cached_denoised_image
-    if cached_denoised_image is not None:
-        return blend_images(input, cached_denoised_image, strength, model_threshold, median, mad)
+    # if cached_denoised_image is not None:
+    #     return blend_images(input, cached_denoised_image, strength, model_threshold, median, mad)
 
     num_colors = image.shape[-1]
-    if num_colors == 1:
-        image = np.array([image[:, :, 0], image[:, :, 0], image[:, :, 0]])
-        image = np.moveaxis(image, 0, -1)
+    # if num_colors == 1:
+    #     image = np.array([image[:, :, 0], image[:, :, 0], image[:, :, 0]])
+    #     image = np.moveaxis(image, 0, -1)
 
     H, W, _ = image.shape
     offset = int((window_size - stride) / 2)
@@ -66,6 +75,8 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
 
     output = copy.deepcopy(image)
 
+    sess_options = ort.SessionOptions()
+    sess_options.log_severity_level = 0
     providers = get_execution_providers_ordered(ai_gpu_acceleration)
     session = ort.InferenceSession(ai_path, providers=providers)
 
@@ -90,6 +101,7 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
 
         input_tiles = []
         input_tile_copies = []
+        params = []
         for t_idx in range(0, batch_size):
 
             index = b + t_idx
@@ -103,9 +115,17 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
             y = stride * j
 
             tile = image[x : x + window_size, y : y + window_size, :]
-            tile = (tile - median) / mad * 0.04
+            # tile = (tile - median) / mad * 0.04
+            _min = np.min(tile)
+            tile = tile - _min + 1e-5
+            tile = np.log(tile)
+            _mean = np.mean(tile)
+            _std = np.std(tile)
+            tile = (tile - _mean) / _std * 0.1
+            params.append([_min, _mean, _std])
+
             input_tile_copies.append(np.copy(tile))
-            tile = np.clip(tile, -model_threshold, model_threshold)
+            # tile = np.clip(tile, -model_threshold, model_threshold)
 
             input_tiles.append(tile)
 
@@ -113,6 +133,8 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
             continue
 
         input_tiles = np.array(input_tiles)
+        input_tiles = np.moveaxis(input_tiles, -1, 1)
+
 
         output_tiles = []
         session_result = session.run(None, {"gen_input_image": input_tiles})[0]
@@ -120,6 +142,14 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
             output_tiles.append(e)
 
         output_tiles = np.array(output_tiles)
+        output_tiles = input_tiles - output_tiles
+        # output_tiles = np.repeat(output_tiles, repeats=3, axis=1)
+        output_tiles = np.moveaxis(output_tiles, 1, -1)
+
+        for idx in range(batch_size):
+            output_tiles[idx] = output_tiles[idx] * params[idx][2] / 0.1 + params[idx][1]
+            output_tiles[idx] = np.exp(output_tiles[idx])
+            output_tiles[idx] = output_tiles[idx] + params[idx][0] - 1e-5
 
         for t_idx, tile in enumerate(output_tiles):
 
@@ -133,7 +163,7 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
             x = stride * i
             y = stride * j
             tile = np.where(input_tile_copies[t_idx] < model_threshold, tile, input_tile_copies[t_idx])
-            tile = tile / 0.04 * mad + median
+            # tile = tile / 0.04 * mad + median
             tile = tile[offset : offset + stride, offset : offset + stride, :]
             output[x + offset : stride * (i + 1) + offset, y + offset : stride * (j + 1) + offset, :] = tile
 
@@ -146,13 +176,16 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
             last_progress = p
 
     output = output[offset : H + offset, offset : W + offset, :]
+    # output = output * _std / 0.1 + _mean
+    # output = np.exp(output)
+    # output = output + _min - 1e-5
 
-    if num_colors == 1:
-        output = np.array([output[:, :, 0]])
-        output = np.moveaxis(output, 0, -1)
+    # if num_colors == 1:
+    #     output = np.array([output[:, :, 0]])
+    #     output = np.moveaxis(output, 0, -1)
 
     cached_denoised_image = output
-    output = blend_images(input, output, strength, model_threshold, median, mad)
+    # output = blend_images(input, output, strength, model_threshold, median, mad)
 
     eventbus.remove_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
     logging.info("Finished denoising")
