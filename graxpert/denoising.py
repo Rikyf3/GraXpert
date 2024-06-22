@@ -78,7 +78,7 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
     sess_options = ort.SessionOptions()
     sess_options.log_severity_level = 0
     providers = get_execution_providers_ordered(ai_gpu_acceleration)
-    session = ort.InferenceSession(ai_path, providers=providers)
+    session = ort.InferenceSession(ai_path, providers=providers, sess_options=sess_options)
 
     logging.info(f"Available inference providers : {providers}")
     logging.info(f"Used inference providers : {session.get_providers()}")
@@ -115,7 +115,10 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
             y = stride * j
 
             tile = image[x : x + window_size, y : y + window_size, :]
+            # median = np.median(image[::4, ::4, :], axis=[0, 1])
+            # mad = np.median(np.abs(image[::4, ::4, :] - median), axis=[0, 1])
             # tile = (tile - median) / mad * 0.04
+            # params.append([median, mad])
             _min = np.min(tile)
             tile = tile - _min + 1e-5
             tile = np.log(tile)
@@ -134,6 +137,7 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
 
         input_tiles = np.array(input_tiles)
         input_tiles = np.moveaxis(input_tiles, -1, 1)
+        input_tiles = np.reshape(input_tiles, [input_tiles.shape[0] * num_colors, 1, 256, 256])
 
 
         output_tiles = []
@@ -144,12 +148,14 @@ def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128,
         output_tiles = np.array(output_tiles)
         output_tiles = input_tiles - output_tiles
         # output_tiles = np.repeat(output_tiles, repeats=3, axis=1)
+        output_tiles = np.reshape(output_tiles, [output_tiles.shape[0] // num_colors, num_colors, 256, 256])
         output_tiles = np.moveaxis(output_tiles, 1, -1)
 
-        for idx in range(batch_size):
+        for idx in range(len(params)):
             output_tiles[idx] = output_tiles[idx] * params[idx][2] / 0.1 + params[idx][1]
             output_tiles[idx] = np.exp(output_tiles[idx])
             output_tiles[idx] = output_tiles[idx] + params[idx][0] - 1e-5
+            # output_tiles[idx] = output_tiles[idx] / 0.04 * params[idx][1] + params[idx][0]
 
         for t_idx, tile in enumerate(output_tiles):
 
