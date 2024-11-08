@@ -1,7 +1,6 @@
 import logging
 
 import numpy as np
-from skimage import img_as_float32, io
 
 """
 Find the mode of a distribution using a route based on the SKYALL as described in

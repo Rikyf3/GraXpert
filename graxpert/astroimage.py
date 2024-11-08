@@ -4,10 +4,8 @@ import os
 
 import numpy as np
 from astropy.io import fits
-from astropy.stats import sigma_clipped_stats
 from PIL import Image, ImageEnhance
-from skimage import exposure, img_as_float32, io
-from skimage.util import img_as_uint
+import cv2 as cv
 from xisf import XISF
 
 from graxpert.app_state import AppState
@@ -57,7 +55,9 @@ class AstroImage:
             self.image_metadata["XISFProperties"]["GraXpert:ProcessingHistory"] = entry
 
         else:
-            img_array = np.copy(io.imread(directory))
+            img_array = cv.imread(directory)
+            if img_array.shape[-1] == 3:
+                img_array = cv.cvtColor(img_array, cv.COLOR_BGR2RGB)
             self.fits_header = fits.Header()
 
         # Reshape greyscale picture to shape (y,x,1)
@@ -66,10 +66,8 @@ class AstroImage:
             img_array = np.moveaxis(img_array, 0, -1)
 
         # Use 32 bit float with range (0,1) for internal calculations
-        img_array = img_as_float32(img_array)
-
-        if np.min(img_array) < 0 or np.max(img_array > 1):
-            img_array = exposure.rescale_intensity(img_array, out_range=(0, 1))
+        img_array = img_array.astype(np.float32)
+        img_array = (img_array - img_array.min()) / (img_array.max() - img_array.min())
 
         self.img_array = img_array
         self.width = self.img_array.shape[1]
@@ -90,9 +88,6 @@ class AstroImage:
         img_display = self.stretch(stretch_params)
         img_display = img_display * 255
 
-        # if self.roworder == "TOP-DOWN":
-        #    img_display = np.flip(img_display, axis=0)
-
         if img_display.shape[2] == 1:
             self.img_display = Image.fromarray(img_display[:, :, 0].astype(np.uint8))
         else:
@@ -104,9 +99,6 @@ class AstroImage:
 
     def update_display_from_array(self, img_display, saturation):
         img_display = img_display * 255
-
-        # if self.roworder == "TOP-DOWN":
-        #    img_display = np.flip(img_display, axis=0)
 
         if img_display.shape[2] == 1:
             self.img_display = Image.fromarray(img_display[:, :, 0].astype(np.uint8))
@@ -151,7 +143,7 @@ class AstroImage:
             return
 
         if saveas_type == "16 bit Tiff" or saveas_type == "16 bit Fits" or saveas_type == "16 bit XISF":
-            image_converted = img_as_uint(self.img_array)
+            image_converted = self.img_array.astype(np.uint16)
         else:
             image_converted = self.img_array.astype(np.float32)
 
@@ -163,7 +155,9 @@ class AstroImage:
                 image_converted = image_converted[:, :, 0]
 
         if saveas_type == "16 bit Tiff" or saveas_type == "32 bit Tiff":
-            io.imsave(dir, image_converted)
+            if image_converted.shape[-1] == 3:
+                image_converted = cv.cvtColor(image_converted, cv.COLOR_RGB2BGR)
+            cv.imwrite(dir, image_converted)
 
         elif saveas_type == "16 bit XISF" or saveas_type == "32 bit XISF":
             self.update_xisf_imagedata()
@@ -185,7 +179,7 @@ class AstroImage:
         stretched_img = self.stretch(stretch_params)
 
         if saveas_type == "16 bit Tiff" or saveas_type == "16 bit Fits" or saveas_type == "16 bit XISF":
-            image_converted = img_as_uint(stretched_img)
+            image_converted = stretched_img.astype(np.float32)
         else:
             image_converted = stretched_img.astype(np.float32)
 
@@ -197,7 +191,9 @@ class AstroImage:
                 image_converted = image_converted[:, :, 0]
 
         if saveas_type == "16 bit Tiff" or saveas_type == "32 bit Tiff":
-            io.imsave(dir, image_converted)
+            if image_converted.shape[-1] == 3:
+                image_converted = cv.cvtColor(image_converted, cv.COLOR_RGB2BGR)
+            cv.imwrite(dir, image_converted)
 
         elif saveas_type == "16 bit XISF" or saveas_type == "32 bit XISF":
             self.update_xisf_imagedata()

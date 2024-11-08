@@ -1,12 +1,11 @@
 import logging
-from concurrent.futures.process import _ResultItem
 
 import numpy as np
 from scipy.spatial import KDTree
-from skimage.color import rgb2gray
 
 from graxpert.astroimage import AstroImage
 from graxpert.grid_utils import find_darkest_quadrant
+import cv2 as cv
 
 
 def idx_to_coords(idx, dist):
@@ -68,7 +67,7 @@ def background_flood_selection(
     # Convert to mono
     data_mono = np.copy(image.img_display)
     if data_mono.shape[-1] == 3:
-        data_mono = rgb2gray(data_mono)
+        data_mono = cv.cvtColor(data_mono, cv.COLOR_RGB2GRAY)
 
     global_median = np.median(data_mono)
 

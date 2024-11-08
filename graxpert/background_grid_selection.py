@@ -1,9 +1,6 @@
 import numpy as np
-from skimage import color
-from skimage.transform import rescale
+import cv2 as cv
 
-import graxpert.skyall
-import graxpert.stretch
 from graxpert.grid_utils import find_darkest_quadrant
 
 
@@ -12,7 +9,7 @@ def background_grid_selection(data, num_pts_per_row, tol, sample_size):
     # Convert to mono
     data_mono = np.copy(data)
     if(data_mono.shape[-1] == 3):
-        data_mono = color.rgb2gray(data_mono)
+        data_mono = cv.cvtColor(data_mono, cv.COLOR_RGB2GRAY)
     else:
         data_mono = data_mono[:,:,0]
         
