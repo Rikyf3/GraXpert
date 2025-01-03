@@ -62,7 +62,7 @@ def denoise(image, ai_path, prefs, progress=None):
 
     num_channels = image.shape[-1]
     if num_channels == 1:
-        image = np.repeat(image, 3, axis=-1)
+        image_channels_normalized = np.repeat(image, 3, axis=-1)
     
     engine = InferenceEngine(
         model_path=ai_path,
@@ -72,7 +72,7 @@ def denoise(image, ai_path, prefs, progress=None):
     engine.load_model()
     engine.load_normalization(normalization_dict)
 
-    output = engine.execute(image, None, progress)
+    output = engine.execute(image_channels_normalized, None, progress)
 
     if num_channels == 1:
         output = np.mean(output, axis=-1, keepdims=True)
