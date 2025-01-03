@@ -103,6 +103,9 @@ class GraXpert:
         eventbus.add_listener(AppEvents.AI_BATCH_SIZE_CHANGED, self.on_ai_batch_size_changed)
         eventbus.add_listener(AppEvents.AI_BATCH_SIZE_MODE_CHANGED, self.on_ai_batch_size_mode_changed)
         eventbus.add_listener(AppEvents.AI_GPU_ACCELERATION_CHANGED, self.on_ai_gpu_acceleration_changed)
+
+        # Add new tracking attributes
+        self.processing_chain = []  # Tracks order of processing steps
     
     
 
@@ -167,8 +170,8 @@ class GraXpert:
         try:
             self.prefs.images_linked_option = False
 
-            # img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Original).img_array)
-            img_array_to_be_processed = self.get_current_image_array(copy=True)
+            # Get base image to process
+            img_array_to_be_processed = self.get_base_image_for_step("background")
 
             background = AstroImage()
             background.set_from_array(
@@ -197,6 +200,11 @@ class GraXpert:
             self.images.set(ImageTypes.Background, background)
 
             self.images.stretch_all(StretchParameters(self.prefs.stretch_option, self.prefs.channels_linked_option), self.prefs.saturation)
+
+            # Update processing chain
+            if "background" in self.processing_chain:
+                self.processing_chain.remove("background")
+            self.processing_chain.append("background")
 
             eventbus.emit(AppEvents.CALCULATE_SUCCESS)
             eventbus.emit(AppEvents.UPDATE_DISPLAY_TYPE_REEQUEST, {"display_type": "Gradient-Corrected"})
@@ -274,10 +282,9 @@ class GraXpert:
         deconvolution_type_option = self.prefs.deconvolution_type_option
 
         try:
-            img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Original).img_array)
-            if self.images.get(ImageTypes.Gradient_Corrected) is not None:
-                # img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Gradient_Corrected).img_array)
-                img_array_to_be_processed = self.get_current_image_array(copy=True)
+            # Get base image to process
+            img_array_to_be_processed = self.get_base_image_for_step("deconvolution")
+
             self.prefs.images_linked_option = True
 
             if deconvolution_type_option == "Object-only":
@@ -308,6 +315,11 @@ class GraXpert:
                 self.images.set(f"Deconvolved {deconvolution_type_option}", deconvolved)
 
                 self.images.stretch_all(StretchParameters(self.prefs.stretch_option, self.prefs.channels_linked_option, self.prefs.images_linked_option), self.prefs.saturation)
+
+                # Update processing chain
+                if "deconvolution" in self.processing_chain:
+                    self.processing_chain.remove("deconvolution")
+                self.processing_chain.append("deconvolution")
 
                 eventbus.emit(AppEvents.DECONVOLUTION_SUCCESS, {"deconvolution_type_option": f"Deconvolved {deconvolution_type_option}"})
                 eventbus.emit(AppEvents.UPDATE_DISPLAY_TYPE_REEQUEST, {"display_type": f"Deconvolved {deconvolution_type_option}"})
@@ -448,7 +460,8 @@ class GraXpert:
         progress = DynamicProgressThread(callback=lambda p: eventbus.emit(AppEvents.DENOISE_PROGRESS, {"progress": p}))
 
         try:
-            img_array_to_be_processed = self.get_current_image_array(copy=True)
+            # Get base image to process
+            img_array_to_be_processed = self.get_base_image_for_step("denoise")
 
             self.prefs.images_linked_option = True
             ai_model_path = ai_model_path_from_version(denoise_ai_models_dir, self.prefs.denoise_ai_version)
@@ -461,7 +474,6 @@ class GraXpert:
             )
 
             if imarray is not None:
-
                 denoised = AstroImage()
                 denoised.set_from_array(imarray)
 
@@ -474,6 +486,11 @@ class GraXpert:
                 self.images.set(ImageTypes.Denoised, denoised)
 
                 self.images.stretch_all(StretchParameters(self.prefs.stretch_option, self.prefs.channels_linked_option, self.prefs.images_linked_option), self.prefs.saturation)
+
+                # Update processing chain
+                if "denoise" in self.processing_chain:
+                    self.processing_chain.remove("denoise")
+                self.processing_chain.append("denoise")
 
                 eventbus.emit(AppEvents.DENOISE_SUCCESS)
                 eventbus.emit(AppEvents.UPDATE_DISPLAY_TYPE_REEQUEST, {"display_type": "Denoised"})
@@ -744,6 +761,39 @@ class GraXpert:
         if current_image is None:
             return None
         return np.copy(current_image.img_array) if copy else current_image.img_array
+
+    def get_base_image_for_step(self, step):
+        """Get the appropriate base image for the given processing step"""
+        if not self.processing_chain:
+            # If no processing done yet, use original
+            return np.copy(self.images.get(ImageTypes.Original).img_array)
+
+        # Find the last processing step before this one
+        try:
+            step_idx = self.processing_chain.index(step)
+            if step_idx > 0:
+                # Get the image from previous step
+                prev_step = self.processing_chain[step_idx - 1]
+                prev_type = self.step_to_image_type(prev_step)
+                return np.copy(self.images.get(prev_type).img_array)
+        except ValueError:
+            # Step not in chain, find last processed image
+            prev_step = self.processing_chain[-1]
+            prev_type = self.step_to_image_type(prev_step)
+            return np.copy(self.images.get(prev_type).img_array)
+
+        # Fallback to original
+        return np.copy(self.images.get(ImageTypes.Original).img_array)
+
+    def step_to_image_type(self, step):
+        """Convert processing step name to ImageTypes enum"""
+        step_map = {
+            "background": ImageTypes.Gradient_Corrected,
+            "deconvolution": ImageTypes.Deconvolved_Object_only if self.prefs.deconvolution_type_option == "Object-only" 
+                           else ImageTypes.Deconvolved_Stars_only,
+            "denoise": ImageTypes.Denoised
+        }
+        return step_map.get(step, ImageTypes.Original)
 
 
 graxpert = GraXpert()

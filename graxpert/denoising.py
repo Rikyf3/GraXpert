@@ -51,13 +51,14 @@ normalization_dict = {
 }
 
 def denoise(image, ai_path, prefs, progress=None):
-    logging.info("Starting denoising")
+    global cached_denoised_image
 
     strenght = prefs.denoise_strength
 
-    global cached_denoised_image
     if cached_denoised_image is not None:
         return (1.0 - strenght) * image + strenght * cached_denoised_image
+
+    logging.info("Starting denoising")
 
     num_channels = image.shape[-1]
     if num_channels == 1:
@@ -72,7 +73,6 @@ def denoise(image, ai_path, prefs, progress=None):
     engine.load_normalization(normalization_dict)
 
     output = engine.execute(image, None, progress)
-    cached_denoised_image = output
 
     if num_channels == 1:
         output = np.mean(output, axis=-1, keepdims=True)
@@ -80,6 +80,9 @@ def denoise(image, ai_path, prefs, progress=None):
     logging.info("Finished denoising")
 
     engine.cleanup()
+
+    # Cache the denoised output before blending
+    cached_denoised_image = output.copy()
 
     return (1.0 - strenght) * image + strenght * output
 
