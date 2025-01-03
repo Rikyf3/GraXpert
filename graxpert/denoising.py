@@ -5,166 +5,83 @@ import time
 import numpy as np
 import onnxruntime as ort
 
-from graxpert.ai_model_handling import get_execution_providers_ordered
+from graxpert.ai_model_handling import InferenceEngine
 from graxpert.application.app_events import AppEvents
 from graxpert.application.eventbus import eventbus
 from graxpert.ui.ui_events import UiEvents
 
 
-def denoise(image, ai_path, strength, batch_size=4, window_size=256, stride=128, progress=None, ai_gpu_acceleration=True):
+class MedianNorm:
+    def __init__(self, model_threshold):
+        self.model_threshold = model_threshold
 
+    def normalize(self, patches):
+        # patches = [-1, channels, patch_size, patch_size]
+        norm_params = np.empty((patches.shape[0], 2, patches.shape[1], 1, 1), dtype=np.float32)
+
+        _median = np.median(patches, axis=(0, 2, 3), keepdims=True)
+        _mad = np.median(np.abs(patches - _median), axis=(0, 2, 3), keepdims=True)
+
+        patches = (patches - _median) / _mad * 0.04
+        patches = np.clip(patches, -self.model_threshold, self.model_threshold)
+
+        norm_params[:, 0] = _median
+        norm_params[:, 1] = _mad
+        
+        return patches, norm_params
+    
+    def denormalize(self, patches, norm_params):
+        _median, _mad = norm_params[:, 0], norm_params[:, 1]
+        
+        patches = patches * _mad / 0.04 + _median
+        
+        return patches
+
+
+class ParamsNorm:
+    def normalize(self, params):
+        return params
+
+
+normalization_dict = {
+    "1.0" : (MedianNorm(model_threshold=1.0), ParamsNorm(), {"patch_size": 256, "stride": 224, "channels": 3, "residuals": False, "channel_last": True}) ,
+    "1.1" : (MedianNorm(model_threshold=1.0), ParamsNorm(), {"patch_size": 256, "stride": 224, "channels": 3, "residuals": False, "channel_last": True}) ,
+    "2.0" : (MedianNorm(model_threshold=10.0), ParamsNorm(), {"patch_size": 256, "stride": 224, "channels": 3, "residuals": False, "channel_last": True}) ,
+    "3.0" : (MedianNorm(model_threshold=10.0), ParamsNorm(), {"patch_size": 256, "stride": 224, "channels": 3, "residuals": False, "channel_last": True}) ,
+}
+
+def denoise(image, ai_path, prefs, progress=None):
     logging.info("Starting denoising")
 
-    if batch_size < 1:
-        logging.info(f"mapping batch_size of {batch_size} to 1")
-        batch_size = 1
-    elif batch_size > 32:
-        logging.info(f"mapping batch_size of {batch_size} to 32")
-        batch_size = 32
-    elif not (batch_size & (batch_size - 1) == 0):  # check if batch_size is power of two
-        logging.info(f"mapping batch_size of {batch_size} to {2 ** (batch_size).bit_length() // 2}")
-        batch_size = 2 ** (batch_size).bit_length() // 2  # map batch_size to power of two
-
-    input = copy.deepcopy(image)
-
-    median = np.median(image[::4, ::4, :], axis=[0, 1])
-    mad = np.median(np.abs(image[::4, ::4, :] - median), axis=[0, 1])
-    
-    if "1.0.0" in ai_path or "1.1.0" in ai_path:
-        model_threshold = 1.0
-    else:
-        model_threshold = 10.0
+    strenght = prefs.denoise_strength
 
     global cached_denoised_image
     if cached_denoised_image is not None:
-        return blend_images(input, cached_denoised_image, strength, model_threshold, median, mad)
+        return (1.0 - strenght) * image + strenght * cached_denoised_image
 
-    num_colors = image.shape[-1]
-    if num_colors == 1:
-        image = np.array([image[:, :, 0], image[:, :, 0], image[:, :, 0]])
-        image = np.moveaxis(image, 0, -1)
+    num_channels = image.shape[-1]
+    if num_channels == 1:
+        image = np.repeat(image, 3, axis=-1)
+    
+    engine = InferenceEngine(
+        model_path=ai_path,
+        prefs=prefs,
+    )
 
-    H, W, _ = image.shape
-    offset = int((window_size - stride) / 2)
+    engine.load_model()
+    engine.load_normalization(normalization_dict)
 
-    h, w, _ = image.shape
-
-    ith = int(h / stride) + 1
-    itw = int(w / stride) + 1
-
-    dh = ith * stride - h
-    dw = itw * stride - w
-
-    image = np.concatenate((image, image[(h - dh) :, :, :]), axis=0)
-    image = np.concatenate((image, image[:, (w - dw) :, :]), axis=1)
-
-    h, w, _ = image.shape
-    image = np.concatenate((image, image[(h - offset) :, :, :]), axis=0)
-    image = np.concatenate((image[:offset, :, :], image), axis=0)
-    image = np.concatenate((image, image[:, (w - offset) :, :]), axis=1)
-    image = np.concatenate((image[:, :offset, :], image), axis=1)
-
-    output = copy.deepcopy(image)
-
-    providers = get_execution_providers_ordered(ai_gpu_acceleration)
-    session = ort.InferenceSession(ai_path, providers=providers)
-
-    logging.info(f"Available inference providers : {providers}")
-    logging.info(f"Used inference providers : {session.get_providers()}")
-
-    cancel_flag = False
-
-    def cancel_listener(event):
-        nonlocal cancel_flag
-        cancel_flag = True
-
-    eventbus.add_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
-
-    last_progress = 0
-    for b in range(0, ith * itw + batch_size, batch_size):
-
-        if cancel_flag:
-            logging.info("Denoising cancelled")
-            eventbus.remove_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
-            return None
-
-        input_tiles = []
-        input_tile_copies = []
-        for t_idx in range(0, batch_size):
-
-            index = b + t_idx
-            i = index % ith
-            j = index // ith
-
-            if i >= ith or j >= itw:
-                break
-
-            x = stride * i
-            y = stride * j
-
-            tile = image[x : x + window_size, y : y + window_size, :]
-            tile = (tile - median) / mad * 0.04
-            input_tile_copies.append(np.copy(tile))
-            tile = np.clip(tile, -model_threshold, model_threshold)
-
-            input_tiles.append(tile)
-
-        if not input_tiles:
-            continue
-
-        input_tiles = np.array(input_tiles)
-
-        output_tiles = []
-        session_result = session.run(None, {"gen_input_image": input_tiles})[0]
-        for e in session_result:
-            output_tiles.append(e)
-
-        output_tiles = np.array(output_tiles)
-
-        for t_idx, tile in enumerate(output_tiles):
-
-            index = b + t_idx
-            i = index % ith
-            j = index // ith
-
-            if i >= ith or j >= itw:
-                break
-
-            x = stride * i
-            y = stride * j
-            tile = np.where(input_tile_copies[t_idx] < model_threshold, tile, input_tile_copies[t_idx])
-            tile = tile / 0.04 * mad + median
-            tile = tile[offset : offset + stride, offset : offset + stride, :]
-            output[x + offset : stride * (i + 1) + offset, y + offset : stride * (j + 1) + offset, :] = tile
-
-        p = int(b / (ith * itw + batch_size) * 100)
-        if p > last_progress:
-            if progress is not None:
-                progress.update(p - last_progress)
-            else:
-                logging.info(f"Progress: {p}%")
-            last_progress = p
-
-    output = output[offset : H + offset, offset : W + offset, :]
-
-    if num_colors == 1:
-        output = np.array([output[:, :, 0]])
-        output = np.moveaxis(output, 0, -1)
-
+    output = engine.execute(image, None, progress)
     cached_denoised_image = output
-    output = blend_images(input, output, strength, model_threshold, median, mad)
 
-    eventbus.remove_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
+    if num_channels == 1:
+        output = np.mean(output, axis=-1, keepdims=True)
+
     logging.info("Finished denoising")
 
-    return output
+    engine.cleanup()
 
-
-def blend_images(original_image, denoised_image, strength, threshold, median, mad):
-    threshold = threshold / 0.04 * mad + median
-    blend = np.where(original_image < threshold, denoised_image, original_image)
-    blend = blend * strength + original_image * (1 - strength)
-    return np.clip(blend, 0, 1)
+    return (1.0 - strenght) * image + strenght * output
 
 
 def reset_cached_denoised_image(event):

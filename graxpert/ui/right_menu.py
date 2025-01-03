@@ -15,6 +15,9 @@ from graxpert.localization import _, lang
 from graxpert.resource_utils import resource_path
 from graxpert.s3_secrets import bge_bucket_name, deconvolution_object_bucket_name, deconvolution_stars_bucket_name, denoise_bucket_name
 from graxpert.ui.widgets import GraXpertOptionMenu, GraXpertScrollableFrame, ProcessingStep, ValueSlider, padx, pady
+from graxpert.ai_model_handling import InferenceEngine, ai_model_path_from_version
+from graxpert.deconvolution import normalization_dict
+from graxpert.ui.loadingframe import DynamicProgressThread
 
 
 class HelpText(CTkTextbox):
@@ -230,10 +233,14 @@ class AdvancedFrame(RightFrameBase):
         self.denoise_ai_version.trace_add("write", lambda a, b, c: eventbus.emit(AppEvents.DENOISE_AI_VERSION_CHANGED, {"denoise_ai_version": self.denoise_ai_version.get()}))
 
         # ai settings
-        self.ai_batch_size_options = ["1", "2", "4", "8", "16", "32"]
-        self.ai_batch_size = tk.IntVar()
-        self.ai_batch_size.set(graxpert.prefs.ai_batch_size)
-        self.ai_batch_size.trace_add("write", lambda a, b, c: eventbus.emit(AppEvents.AI_BATCH_SIZE_CHANGED, {"ai_batch_size": self.ai_batch_size.get()}))
+        # self.ai_batch_size_options = ["1", "2", "4", "8", "16", "32"]
+        # self.ai_batch_size = tk.IntVar()
+        # self.ai_batch_size.set(graxpert.prefs.ai_batch_size)
+        # self.ai_batch_size.trace_add("write", lambda a, b, c: eventbus.emit(AppEvents.AI_BATCH_SIZE_CHANGED, {"ai_batch_size": self.ai_batch_size.get()}))
+        self.ai_batch_size_options = ["standard", "optimized"]
+        self.ai_batch_size = tk.StringVar()
+        self.ai_batch_size.set(graxpert.prefs.ai_batch_size_option)
+        self.ai_batch_size.trace_add("write", self.on_ai_batch_size_change)
 
         self.ai_gpu_acceleration = tk.BooleanVar()
         self.ai_gpu_acceleration.set(graxpert.prefs.ai_gpu_acceleration)
@@ -245,7 +252,32 @@ class AdvancedFrame(RightFrameBase):
     def on_scaling_change(self, a, b, c):
         eventbus.emit(AppEvents.SCALING_CHANGED, {"scaling": self.scaling.get()})
         ctk.set_widget_scaling(self.scaling.get())
+    
+    def on_ai_batch_size_change(self, a, b, c):
+        eventbus.emit(AppEvents.AI_BATCH_SIZE_MODE_CHANGED, {"ai_batch_size_option": self.ai_batch_size.get()})
 
+        if self.ai_batch_size.get() == "standard":
+            eventbus.emit(AppEvents.AI_BATCH_SIZE_CHANGED, {"ai_batch_size": 1})
+            return
+        
+        eventbus.emit(AppEvents.AI_BATCH_SIZE_CALCULATION_BEGIN)
+
+        progress = DynamicProgressThread(callback=lambda p: eventbus.emit(AppEvents.AI_BATCH_SIZE_CALCULATION_PROGRESS, {"progress": p}))
+
+        # TODO : how do I make it work with the correct model?
+        engine = InferenceEngine(
+            model_path=ai_model_path_from_version(deconvolution_stars_ai_models_dir, self.deconvolution_object_ai_version.get()),
+            prefs=graxpert.prefs,
+        )
+        engine.load_model()
+        engine.load_normalization(normalization_dict=normalization_dict)
+
+        best_batch_size = engine.calc_best_batch_size(64, progress=progress)
+        print(f"Best batch size: {best_batch_size}")
+        
+        eventbus.emit(AppEvents.AI_BATCH_SIZE_CHANGED, {"ai_batch_size": best_batch_size})
+        eventbus.emit(AppEvents.AI_BATCH_SIZE_CALCULATION_END)
+    
     def create_and_place_children(self):
         CTkLabel(self, text=_("Advanced Settings"), font=self.heading_font).grid(column=0, row=self.nrow(), pady=pady, sticky=tk.N)
 

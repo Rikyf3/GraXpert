@@ -165,6 +165,8 @@ bg_tol_text = _("The tolerance adjusts the threshold for rejection of background
 
 bg_flood_text = _("If enabled, additional grid points are automatically created based on " "1) the luminance of the sample just added and " "2) the grid tolerance slider below.")
 
+bg_auto_text = _("If enabled, points are placed using an intelligent algorithm based on Simulated Annealing.")
+
 num_points_text = _("Adjust the number of points per row for the grid created by" " automatic background selection.")
 
 interpol_type_text = _("Choose between different interpolation methods.")

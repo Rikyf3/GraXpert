@@ -9,6 +9,11 @@ from appdirs import user_data_dir
 from minio import Minio
 from packaging import version
 
+import numpy as np
+import time
+from graxpert.application.app_events import AppEvents
+from graxpert.application.eventbus import eventbus
+
 try:
     from graxpert.s3_secrets import endpoint, ro_access_key, ro_secret_key
 
@@ -193,3 +198,219 @@ def get_execution_providers_ordered(gpu_acceleration=True):
             if provider in ort.get_available_providers():
                 result.append(provider)
     return result
+
+
+class InferenceEngine:
+    def __init__(self, model_path, prefs, auxiliary_model_path=None):
+        self.model_path = model_path
+        self.aux_model_path = auxiliary_model_path
+        self.model_version = os.path.basename(os.path.dirname(model_path))
+        self.model_type = os.path.basename(os.path.dirname(os.path.dirname(model_path)))
+        
+        self.patch_size = None
+        self.stride = None
+        self.channels = None
+        self.residuals = None
+        self.batch_size = prefs.ai_batch_size
+
+        self.providers = get_execution_providers_ordered(prefs.ai_gpu_acceleration)
+        logging.info(f"Available inference providers : {self.providers}")
+        
+        self.model = None
+        self.aux_model = None
+        self.model_normalization = None
+        self.params_normalization = None
+    
+    def cleanup(self):
+        self.model = None
+        self.aux_model = None
+        self.model_normalization = None
+        self.params_normalization = None
+
+    def load_model(self):
+        self.model = ort.InferenceSession(self.model_path, providers=self.providers)
+
+        if self.aux_model_path is not None:
+            self.aux_model = ort.InferenceSession(self.aux_model_path, providers=self.providers)
+
+    def load_normalization(self, normalization_dict):
+        # Extract major.minor version without patch number
+        version_parts = self.model_version.split('.')[:2]
+        version_key = '.'.join(version_parts)
+        self.model_normalization = normalization_dict[version_key][0]
+        self.params_normalization = normalization_dict[version_key][1]
+
+        self.patch_size = normalization_dict[version_key][2].get("patch_size")
+        self.stride = normalization_dict[version_key][2].get("stride")
+        self.channels = normalization_dict[version_key][2].get("channels")
+        self.residuals = normalization_dict[version_key][2].get("residuals")
+        self.channel_last = normalization_dict[version_key][2].get("channel_last")
+
+    # TODO : finish it
+    def calc_best_batch_size(self, num_patches, progress=None, batch_sizes=[1, 2, 4, 8, 16]):
+        cancel_flag = False
+        def cancel_listener(event):
+            nonlocal cancel_flag
+            cancel_flag = True
+        eventbus.add_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
+
+        test_data = np.random.rand(num_patches, self.channels, self.patch_size, self.patch_size).astype(np.float32)
+        
+        best_time = float('inf')
+        best_batch_size = 1
+        
+        # Test different batch sizes
+        for idx, batch_size in enumerate(batch_sizes):
+            try:
+                start_time = time.time()
+                last_progress = 0
+                
+                # Process all patches in batches
+                for i in range(0, num_patches, batch_size):
+                    if cancel_flag:
+                        logging.info("Best batch size calculation cancelled")
+                        eventbus.remove_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
+                        return None
+
+                    end_idx = min(i + batch_size, num_patches)
+                    batch = test_data[i:end_idx]
+                    _ = self.model.run(None, {"gen_input_image": batch, "params": np.zeros((batch_size, 2), dtype=np.float32)})
+                    
+                    p = int(i / (len(batch_sizes) * num_patches) * 100)
+                    if p > last_progress:
+                        if progress is not None:
+                            progress.update(p - last_progress)
+                        else:
+                            logging.info(f"Progress: {p}%")
+                        last_progress = p
+                
+                elapsed_time = time.time() - start_time
+                
+                # Update best batch size if this one was faster
+                if elapsed_time < best_time:
+                    best_time = elapsed_time
+                    best_batch_size = batch_size
+                    
+            except Exception as e:
+                print(e)
+                break
+        
+        return best_batch_size
+
+    def execute(self, image, params, progress=None):
+        h, w, c = image.shape
+
+        cancel_flag = False
+        def cancel_listener(event):
+            nonlocal cancel_flag
+            cancel_flag = True
+        eventbus.add_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
+        
+        num_h = int(np.ceil((h - self.patch_size) / self.stride)) + 1
+        num_w = int(np.ceil((w - self.patch_size) / self.stride)) + 1
+        
+        pad_h = (num_h - 1) * self.stride + self.patch_size - h
+        pad_w = (num_w - 1) * self.stride + self.patch_size - w
+        
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        new_h = pad_top + h + pad_bottom
+        new_w = pad_left + w + pad_right
+        
+        padded_image = np.pad(
+            image,
+            ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
+            mode='reflect'
+        )
+
+        patches = np.lib.stride_tricks.sliding_window_view(
+            padded_image,
+            (self.patch_size, self.patch_size, self.channels)
+        )[::self.stride, ::self.stride] #[num_h, num_w, num_c, patch_size, patch_size, 1]
+        patches = patches.reshape(-1, self.patch_size, self.patch_size, self.channels)
+        patches = np.moveaxis(patches, -1, 1)
+        total_patches = patches.shape[0]
+
+        patches, norm_params = self.model_normalization.normalize(patches)
+        
+        if params is not None:
+            params = self.params_normalization.normalize(params, model_type=self.model_type)
+            if params.shape[0] == 1:
+                params = np.repeat(params, total_patches, axis=0)
+
+        last_progress = 0
+        for idx in range(0, total_patches, self.batch_size):
+            if cancel_flag:
+                logging.info("AI Inference cancelled")
+                eventbus.remove_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
+                return None
+
+            batch_patches = patches[idx:idx+self.batch_size]
+            if self.channel_last:
+                batch_patches = np.moveaxis(batch_patches, 1, -1)
+            
+            model_inputs = {"gen_input_image": batch_patches}
+            if params is not None:
+                model_inputs["params"] = params[idx:idx+self.batch_size]
+            
+            output = self.model.run(None, model_inputs)[0]
+            
+            if self.channel_last:
+                output = np.moveaxis(output, -1, 1)
+
+            if self.residuals:
+                patches[idx:idx+self.batch_size] = patches[idx:idx+self.batch_size] - output
+            else:
+                patches[idx:idx+self.batch_size] = output
+
+            p = int(idx / total_patches * 100)
+            if p > last_progress:
+                if progress is not None:
+                    progress.update(p - last_progress)
+                else:
+                    logging.info(f"Progress: {p}%")
+                last_progress = p
+
+        patches = self.model_normalization.denormalize(patches, norm_params)
+
+        # TODO : do I really need to do all of this?
+        patches = np.moveaxis(patches, 1, -1)
+        patches = patches.reshape(num_h, num_w, -1, self.patch_size, self.patch_size, self.channels)
+        patches = np.moveaxis(patches, 2, -1)
+        patches = patches.reshape(num_h, num_w, self.patch_size, self.patch_size, -1)
+
+        reconstructed_image = np.zeros((new_h, new_w, c), dtype=np.float32)
+        weights = np.zeros((new_h, new_w, c), dtype=np.float32)
+
+        # TODO : parallelize the following code with numba
+        for i in range(num_h):
+            for j in range(num_w):
+                start_h = i * self.stride
+                start_w = j * self.stride
+
+                reconstructed_image[start_h:start_h + self.patch_size, start_w:start_w + self.patch_size] += patches[i, j]
+                weights[start_h:start_h + self.patch_size, start_w:start_w + self.patch_size] += 1
+
+        reconstructed_image = reconstructed_image[pad_top:pad_top + h, pad_left:pad_left + w, :]
+        weights = weights[pad_top:pad_top + h, pad_left:pad_left + w, :]
+
+        reconstructed_image = reconstructed_image / weights
+
+        eventbus.remove_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
+
+        return reconstructed_image
+
+    def execute_full_image(self, image, params):
+        image, norm_params = self.model_normalization.normalize(image)
+
+        model_inputs = {"gen_input_image": image}
+        if params is not None:
+            model_inputs["params"] = params
+
+        output = self.model.run(None, model_inputs)[0]
+
+        output = self.model_normalization.denormalize(output, norm_params)
+
+        return output

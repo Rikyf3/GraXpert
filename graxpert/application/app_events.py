@@ -26,6 +26,7 @@ class AppEvents(Enum):
     # sample selection
     DISPLAY_PTS_CHANGED = auto()
     BG_FLOOD_SELECTION_CHANGED = auto()
+    BG_AUTO_SELECTION_CHANGED = auto()
     BG_PTS_CHANGED = auto()
     BG_TOL_CHANGED = auto()
     CREATE_GRID_REQUEST = auto()
@@ -91,6 +92,10 @@ class AppEvents(Enum):
     LANGUAGE_CHANGED = auto()
     SCALING_CHANGED = auto()
     AI_BATCH_SIZE_CHANGED = auto()
+    AI_BATCH_SIZE_MODE_CHANGED = auto()
+    AI_BATCH_SIZE_CALCULATION_BEGIN = auto()
+    AI_BATCH_SIZE_CALCULATION_PROGRESS = auto()
+    AI_BATCH_SIZE_CALCULATION_END = auto()
     AI_GPU_ACCELERATION_CHANGED = auto()
     # process control
     CANCEL_PROCESSING = auto()

@@ -21,7 +21,7 @@ from graxpert.application.eventbus import eventbus
 from graxpert.astroimage import AstroImage
 from graxpert.AstroImageRepository import AstroImageRepository, ImageTypes
 from graxpert.background_extraction import extract_background
-from graxpert.commands import INIT_HANDLER, RESET_POINTS_HANDLER, RM_POINT_HANDLER, SEL_POINTS_HANDLER, Command
+from graxpert.commands import INIT_HANDLER, RESET_POINTS_HANDLER, RM_POINT_HANDLER, SEL_POINTS_HANDLER, AUTO_POINTS_HANDLER, Command
 from graxpert.deconvolution import deconvolve
 from graxpert.denoising import denoise
 from graxpert.localization import _
@@ -33,7 +33,6 @@ from graxpert.ui.loadingframe import DynamicProgressThread
 
 
 class GraXpert:
-
     def __init__(self):
         self.initialize()
 
@@ -68,6 +67,7 @@ class GraXpert:
         # sample selection
         eventbus.add_listener(AppEvents.DISPLAY_PTS_CHANGED, self.on_display_pts_changed)
         eventbus.add_listener(AppEvents.BG_FLOOD_SELECTION_CHANGED, self.on_bg_floot_selection_changed)
+        eventbus.add_listener(AppEvents.BG_AUTO_SELECTION_CHANGED, self.on_auto_selection_changed)
         eventbus.add_listener(AppEvents.BG_PTS_CHANGED, self.on_bg_pts_changed)
         eventbus.add_listener(AppEvents.BG_TOL_CHANGED, self.on_bg_tol_changed)
         eventbus.add_listener(AppEvents.CREATE_GRID_REQUEST, self.on_create_grid_request)
@@ -101,11 +101,17 @@ class GraXpert:
         eventbus.add_listener(AppEvents.DENOISE_AI_VERSION_CHANGED, self.on_denoise_ai_version_changed)
         eventbus.add_listener(AppEvents.SCALING_CHANGED, self.on_scaling_changed)
         eventbus.add_listener(AppEvents.AI_BATCH_SIZE_CHANGED, self.on_ai_batch_size_changed)
+        eventbus.add_listener(AppEvents.AI_BATCH_SIZE_MODE_CHANGED, self.on_ai_batch_size_mode_changed)
         eventbus.add_listener(AppEvents.AI_GPU_ACCELERATION_CHANGED, self.on_ai_gpu_acceleration_changed)
+    
+    
 
     # event handling
     def on_ai_batch_size_changed(self, event):
         self.prefs.ai_batch_size = event["ai_batch_size"]
+
+    def on_ai_batch_size_mode_changed(self, event):
+        self.prefs.ai_batch_size_option = event["ai_batch_size_option"]
 
     def on_ai_gpu_acceleration_changed(self, event):
         self.prefs.ai_gpu_acceleration = event["ai_gpu_acceleration"]
@@ -115,6 +121,9 @@ class GraXpert:
 
     def on_bg_floot_selection_changed(self, event):
         self.prefs.bg_flood_selection_option = event["bg_flood_selection_option"]
+
+    def on_auto_selection_changed(self, event):
+        self.prefs.bg_auto_pts_option = event["bg_auto_selection_option"]
 
     def on_bg_pts_changed(self, event):
         self.prefs.bg_pts_option = event["bg_pts_option"]
@@ -158,23 +167,18 @@ class GraXpert:
         try:
             self.prefs.images_linked_option = False
 
-            img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Original).img_array)
+            # img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Original).img_array)
+            img_array_to_be_processed = self.get_current_image_array(copy=True)
 
             background = AstroImage()
             background.set_from_array(
                 extract_background(
-                    img_array_to_be_processed,
-                    np.array(background_points),
-                    self.prefs.interpol_type_option,
-                    self.prefs.smoothing_option,
-                    downscale_factor,
-                    self.prefs.sample_size,
-                    self.prefs.RBF_kernel,
-                    self.prefs.spline_order,
-                    self.prefs.corr_type,
-                    ai_model_path_from_version(bge_ai_models_dir, self.prefs.bge_ai_version),
-                    progress,
-                    self.prefs.ai_gpu_acceleration,
+                    image=img_array_to_be_processed,
+                    ai_path=ai_model_path_from_version(bge_ai_models_dir, self.prefs.bge_ai_version),
+                    background_points=np.array(background_points),
+                    downscale_factor=downscale_factor,
+                    progress=progress,
+                    prefs=self.prefs
                 )
             )
 
@@ -227,9 +231,15 @@ class GraXpert:
 
         eventbus.emit(AppEvents.CREATE_GRID_BEGIN)
 
-        self.cmd = Command(
-            SEL_POINTS_HANDLER, self.cmd, data=self.images.get(ImageTypes.Original).img_array, num_pts=self.prefs.bg_pts_option, tol=self.prefs.bg_tol_option, sample_size=self.prefs.sample_size
-        )
+        if self.prefs.bg_auto_pts_option:
+            self.cmd = Command(
+                AUTO_POINTS_HANDLER, self.cmd, data=self.images.get(ImageTypes.Original).img_array,
+                num_pts=self.prefs.bg_pts_option, tol=self.prefs.bg_tol_option, sample_size=self.prefs.sample_size
+            )
+        else:
+            self.cmd = Command(
+                SEL_POINTS_HANDLER, self.cmd, data=self.images.get(ImageTypes.Original).img_array, num_pts=self.prefs.bg_pts_option, tol=self.prefs.bg_tol_option, sample_size=self.prefs.sample_size
+            )
         self.cmd.execute()
 
         eventbus.emit(AppEvents.CREATE_GRID_END)
@@ -266,22 +276,22 @@ class GraXpert:
         try:
             img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Original).img_array)
             if self.images.get(ImageTypes.Gradient_Corrected) is not None:
-                img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Gradient_Corrected).img_array)
-
+                # img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Gradient_Corrected).img_array)
+                img_array_to_be_processed = self.get_current_image_array(copy=True)
             self.prefs.images_linked_option = True
 
             if deconvolution_type_option == "Object-only":
                 ai_model_path = ai_model_path_from_version(deconvolution_object_ai_models_dir, self.prefs.deconvolution_object_ai_version)
             else:
                 ai_model_path = ai_model_path_from_version(deconvolution_stars_ai_models_dir, self.prefs.deconvolution_stars_ai_version)
+            
+            params = np.array([[self.prefs.deconvolution_strength, self.prefs.deconvolution_psfsize]])
             imarray = deconvolve(
-                img_array_to_be_processed,
-                ai_model_path,
-                self.prefs.deconvolution_strength,
-                self.prefs.deconvolution_psfsize,
-                batch_size=self.prefs.ai_batch_size,
+                image=img_array_to_be_processed,
+                ai_path=ai_model_path,
+                params=params,
+                prefs=self.prefs,
                 progress=progress,
-                ai_gpu_acceleration=self.prefs.ai_gpu_acceleration,
             )
 
             if imarray is not None:
@@ -438,23 +448,16 @@ class GraXpert:
         progress = DynamicProgressThread(callback=lambda p: eventbus.emit(AppEvents.DENOISE_PROGRESS, {"progress": p}))
 
         try:
-            
-            if self.images.get(ImageTypes.Deconvolved_Object_only) is not None:
-                img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Deconvolved_Object_only).img_array)
-            elif self.images.get(ImageTypes.Gradient_Corrected) is not None:
-                img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Gradient_Corrected).img_array)
-            else:
-                img_array_to_be_processed = np.copy(self.images.get(ImageTypes.Original).img_array)
+            img_array_to_be_processed = self.get_current_image_array(copy=True)
 
             self.prefs.images_linked_option = True
             ai_model_path = ai_model_path_from_version(denoise_ai_models_dir, self.prefs.denoise_ai_version)
+
             imarray = denoise(
-                img_array_to_be_processed,
-                ai_model_path,
-                self.prefs.denoise_strength,
-                batch_size=self.prefs.ai_batch_size,
-                progress=progress,
-                ai_gpu_acceleration=self.prefs.ai_gpu_acceleration,
+                image=img_array_to_be_processed, 
+                ai_path=ai_model_path,
+                prefs=self.prefs, 
+                progress=progress
             )
 
             if imarray is not None:
@@ -484,7 +487,6 @@ class GraXpert:
             eventbus.emit(AppEvents.DENOISE_END)
 
     def on_save_request(self, event):
-
         suffix_1 = "_graxpert"
 
         match self.display_type:
@@ -736,6 +738,12 @@ class GraXpert:
                 download_version(denoise_ai_models_dir, denoise_bucket_name, self.prefs.denoise_ai_version, progress=callback)
                 eventbus.emit(AppEvents.AI_DOWNLOAD_END)
         return True
+
+    def get_current_image_array(self, copy=True):
+        current_image = self.images.get(self.display_type)
+        if current_image is None:
+            return None
+        return np.copy(current_image.img_array) if copy else current_image.img_array
 
 
 graxpert = GraXpert()

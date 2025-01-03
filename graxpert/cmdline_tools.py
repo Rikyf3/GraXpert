@@ -152,17 +152,11 @@ class BGECmdlineTool(CmdlineToolBase):
 
         background_Astro_Image.set_from_array(
             extract_background(
-                astro_Image.img_array,
-                np.array(preferences.background_points),
-                preferences.interpol_type_option,
-                preferences.smoothing_option,
-                downscale_factor,
-                preferences.sample_size,
-                preferences.RBF_kernel,
-                preferences.spline_order,
-                preferences.corr_type,
-                ai_model_path,
-                ai_gpu_acceleration=preferences.ai_gpu_acceleration,
+                image=astro_Image.img_array,
+                ai_path=ai_model_path,
+                background_points=np.array(preferences.background_points),
+                downscale_factor=downscale_factor,
+                prefs=preferences,
             )
         )
 
@@ -270,9 +264,14 @@ class DenoiseCmdlineTool(CmdlineToolBase):
                     denoise strength - {preferences.denoise_strength}"""
             )
         )
-
+    
         processed_Astro_Image.set_from_array(
-            denoise(astro_Image.img_array, ai_model_path, preferences.denoise_strength, batch_size=preferences.ai_batch_size, ai_gpu_acceleration=preferences.ai_gpu_acceleration)
+            denoise(
+                image=astro_Image.img_array, 
+                ai_path=ai_model_path,
+                prefs=preferences,
+                progress=None,
+            )
         )
         processed_Astro_Image.save(self.get_save_path(), self.get_output_file_format())
 
@@ -379,8 +378,15 @@ class DeconvObjCmdlineTool(CmdlineToolBase):
             )
         )
 
+        params = np.array([[preferences.deconvolution_strength, preferences.deconvolution_psfsize]])
         processed_Astro_Image.set_from_array(
-            deconvolve(astro_Image.img_array, ai_model_path, preferences.deconvolution_strength, preferences.deconvolution_psfsize, batch_size=preferences.ai_batch_size, ai_gpu_acceleration=preferences.ai_gpu_acceleration)
+            deconvolve(
+                image=astro_Image.img_array, 
+                ai_path=ai_model_path, 
+                params=params,
+                prefs=preferences,
+                progress=None,
+            )
         )
         processed_Astro_Image.save(self.get_save_path(), self.get_output_file_format())
 
@@ -488,8 +494,15 @@ class DeconvStellarCmdlineTool(CmdlineToolBase):
             )
         )
 
+        params = np.array([[preferences.deconvolution_strength, preferences.deconvolution_psfsize]])
         processed_Astro_Image.set_from_array(
-            deconvolve(astro_Image.img_array, ai_model_path, preferences.deconvolution_strength, preferences.deconvolution_psfsize, batch_size=preferences.ai_batch_size, ai_gpu_acceleration=preferences.ai_gpu_acceleration)
+            deconvolve(
+                image=astro_Image.img_array, 
+                ai_path=ai_model_path,
+                params=params,
+                prefs=preferences,
+                progress=None,
+            )
         )
         processed_Astro_Image.save(self.get_save_path(), self.get_output_file_format())
 

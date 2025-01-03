@@ -19,6 +19,7 @@ class Prefs:
     height: int = None
     background_points: List = field(default_factory=list)
     bg_flood_selection_option: bool = False
+    bg_auto_pts_option: bool = False
     bg_pts_option: int = 15
     stretch_option: AnyStr = "No Stretch"
     saturation: float = 1.0
@@ -46,7 +47,8 @@ class Prefs:
     deconvolution_strength: float = 0.5
     deconvolution_psfsize: float = 5.0
     denoise_strength: float = 0.5
-    ai_batch_size: int = 4
+    ai_batch_size: int = 1
+    ai_batch_size_option: AnyStr = "standard"
     ai_gpu_acceleration: bool = True
 
 

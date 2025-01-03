@@ -6,17 +6,63 @@ import logging
 from concurrent.futures import wait
 from multiprocessing import shared_memory
 
-import cv2
+import cv2 as cv
 import numpy as np
 import onnxruntime as ort
 from astropy.stats import sigma_clipped_stats
 from pykrige.ok import OrdinaryKriging
 from scipy import interpolate, linalg
 
-from graxpert.ai_model_handling import get_execution_providers_ordered
+from graxpert.ai_model_handling import InferenceEngine
 from graxpert.mp_logging import get_logging_queue, worker_configurer
 from graxpert.parallel_processing import executor
 from graxpert.radialbasisinterpolation import RadialBasisInterpolation
+
+
+class MedianNorm:
+    def __init__(self, padding=8):
+        self.padding = padding
+
+    def normalize(self, image):
+        norm_params = np.empty([2, 1, 1, 3])
+
+        image = cv.resize(image, dsize=(256 - 2 * self.padding, 256 - 2 * self.padding), interpolation=cv.INTER_AREA)
+        image = np.pad(image, ((self.padding, self.padding), (self.padding, self.padding), (0, 0)), mode="reflect")
+
+        _median = np.median(image, axis=(0, 1), keepdims=True)
+        _mad = np.median(np.abs(image - _median), axis=(0, 1), keepdims=True)
+
+        image = (image - _median) / _mad * 0.04
+        image = np.clip(image, -1.0, 1.0)
+
+        image = image[np.newaxis, ...]
+
+        norm_params[0] = _median
+        norm_params[1] = _mad
+
+        return image, norm_params
+
+    def denormalize(self, image, norm_params):
+        _median = norm_params[0]
+        _mad = norm_params[1]
+
+        image = image[0, ...]
+
+        image = image * _mad / 0.04 + _median
+
+        image = image[self.padding:-self.padding, self.padding:-self.padding]
+
+        return image
+
+
+class ParamsNorm:
+    def normalize(self, params):
+        return params
+
+
+normalization_dict = {
+    "1.0" : (MedianNorm(), ParamsNorm(), {"channels": 3, "residuals": False, "channel_last": True}),
+}
 
 
 def gaussian_kernel(sigma=1.0, truncate=4.0):  # follow simulate skimage.filters.gaussian defaults
@@ -24,103 +70,44 @@ def gaussian_kernel(sigma=1.0, truncate=4.0):  # follow simulate skimage.filters
     return (ksize, ksize)
 
 
-def extract_background(in_imarray, background_points, interpolation_type, smoothing, downscale_factor, sample_size, RBF_kernel, spline_order, corr_type, ai_path, progress=None, ai_gpu_acceleration=True):
+def extract_background(image, ai_path, background_points, downscale_factor, progress=None, prefs=None):
+    num_channels = image.shape[-1]
 
-    num_colors = in_imarray.shape[-1]
-
-    shm_imarray = None
+    shm_image = None
     shm_background = None
 
-    if interpolation_type == "AI":
-        imarray = np.ndarray(in_imarray.shape, dtype=np.float32)
-        background = np.ndarray(in_imarray.shape, dtype=np.float32)
-        np.copyto(imarray, in_imarray)
+    if prefs.interpol_type_option == "AI":
+        imarray = np.ndarray(image.shape, dtype=np.float32)
+        background = np.ndarray(image.shape, dtype=np.float32)
+        np.copyto(imarray, image)
 
-        # Shrink and pad to avoid artifacts on borders
-        padding = 8
-        imarray_shrink = cv2.resize(imarray, dsize=(256 - 2 * padding, 256 - 2 * padding), interpolation=cv2.INTER_LINEAR)
+        if num_channels == 1:
+            imarray = np.repeat(imarray, 3, axis=-1)
+
+        engine = InferenceEngine(
+            model_path=ai_path,
+            prefs=prefs,
+        )
+
+        engine.load_model()
+        engine.load_normalization(normalization_dict)
+
+        background = engine.execute_full_image(imarray, None)
         
-        if len(imarray_shrink.shape) == 2:
-            imarray_shrink = np.expand_dims(imarray_shrink, -1)
-        
-        imarray_shrink = np.pad(imarray_shrink, ((padding, padding), (padding, padding), (0, 0)), mode="edge")
+        engine.cleanup()
 
-        median = []
-        mad = []
+        if num_channels == 1:
+            background = np.mean(background, axis=-1, keepdims=True)
 
-        if progress is not None:
-            progress.update(8)
+        background = cv.GaussianBlur(background, ksize=gaussian_kernel(sigma=20 * prefs.smoothing_option + 3), sigmaX=20 * prefs.smoothing_option + 3)
 
-        for c in range(num_colors):
-            median.append(np.median(imarray_shrink[:, :, c]))
-            mad.append(np.median(np.abs(imarray_shrink[:, :, c] - median[c])))
-
-        if progress is not None:
-            progress.update(8)
-
-        imarray_shrink = (imarray_shrink - median) / mad * 0.04
-        imarray_shrink = np.clip(imarray_shrink, -1.0, 1.0)
-
-        if progress is not None:
-            progress.update(8)
-
-        if num_colors == 1:
-            imarray_shrink = np.array([imarray_shrink[:, :, 0], imarray_shrink[:, :, 0], imarray_shrink[:, :, 0]])
-            imarray_shrink = np.moveaxis(imarray_shrink, 0, -1)
-
-        if progress is not None:
-            progress.update(8)
-
-        providers = get_execution_providers_ordered(ai_gpu_acceleration)
-        session = ort.InferenceSession(ai_path, providers=providers)
-
-        logging.info(f"Providers : {providers}")
-        logging.info(f"Used providers : {session.get_providers()}")
-
-        background = session.run(None, {"gen_input_image": np.expand_dims(imarray_shrink, axis=0)})[0][0]
-
-        background = background / 0.04 * mad + median
-
-        if progress is not None:
-            progress.update(8)
-
-        if smoothing != 0:
-            sigma = smoothing * 20
-            background = cv2.GaussianBlur(background, ksize=gaussian_kernel(sigma), sigmaX=sigma, sigmaY=sigma)
-
-        if progress is not None:
-            progress.update(8)
-
-        if num_colors == 1:
-            background = np.array([background[:, :, 0]])
-            background = np.moveaxis(background, 0, -1)
-
-        if progress is not None:
-            progress.update(8)
-
-        # Slice to unpadded size of shrinked image, then resize to original size
-        if padding != 0:
-            background = background[padding:-padding, padding:-padding, :]
-
-        if progress is not None:
-            progress.update(8)
-
-        sigma = 3.0
-        background = cv2.GaussianBlur(background, ksize=gaussian_kernel(sigma), sigmaX=sigma, sigmaY=sigma)
-        background = cv2.resize(background, dsize=(in_imarray.shape[1], in_imarray.shape[0]), interpolation=cv2.INTER_LINEAR)
-        
-        if len(background.shape) == 2:
-            background = np.expand_dims(background, -1)
-
-        if progress is not None:
-            progress.update(8)
-
+        background = cv.resize(background, dsize=(imarray.shape[1], imarray.shape[0]), interpolation=cv.INTER_LINEAR)
     else:
-        shm_imarray = shared_memory.SharedMemory(create=True, size=in_imarray.nbytes)
-        shm_background = shared_memory.SharedMemory(create=True, size=in_imarray.nbytes)
-        imarray = np.ndarray(in_imarray.shape, dtype=np.float32, buffer=shm_imarray.buf)
-        background = np.ndarray(in_imarray.shape, dtype=np.float32, buffer=shm_background.buf)
-        np.copyto(imarray, in_imarray)
+        shm_image = shared_memory.SharedMemory(create=True, size=image.nbytes)
+        shm_background = shared_memory.SharedMemory(create=True, size=image.nbytes)
+        imarray = np.ndarray(image.shape, dtype=np.float32, buffer=shm_image.buf)
+        background = np.ndarray(image.shape, dtype=np.float32, buffer=shm_background.buf)
+        np.copyto(imarray, image)
 
         x_sub = np.array(background_points[:, 0], dtype=int)
         y_sub = np.array(background_points[:, 1], dtype=int)
@@ -130,23 +117,23 @@ def extract_background(in_imarray, background_points, interpolation_type, smooth
 
         futures = []
         logging_queue = get_logging_queue()
-        for c in range(num_colors):
+        for c in range(num_channels):
             futures.insert(
                 c,
                 executor.submit(
                     interpol,
-                    shm_imarray.name,
+                    shm_image.name,
                     shm_background.name,
                     c,
                     x_sub,
                     y_sub,
-                    in_imarray.shape,
-                    interpolation_type,
-                    smoothing,
+                    image.shape,
+                    prefs.interpol_type_option,
+                    prefs.smoothing_option,
                     downscale_factor,
-                    sample_size,
-                    RBF_kernel,
-                    spline_order,
+                    prefs.sample_size,
+                    prefs.RBF_kernel,
+                    prefs.spline_order,
                     imarray.dtype,
                     logging_queue,
                     worker_configurer,
@@ -158,11 +145,11 @@ def extract_background(in_imarray, background_points, interpolation_type, smooth
             progress.update(48)
 
     # Correction
-    if corr_type == "Subtraction":
+    if prefs.corr_type == "Subtraction":
         mean = np.mean(background)
         imarray[:, :, :] = imarray[:, :, :] - background[:, :, :] + mean
-    elif corr_type == "Division":
-        for c in range(num_colors):
+    elif prefs.corr_type == "Division":
+        for c in range(num_channels):
             mean = np.mean(imarray[:, :, c])
             imarray[:, :, c] = imarray[:, :, c] / background[:, :, c] * mean
 
@@ -172,14 +159,14 @@ def extract_background(in_imarray, background_points, interpolation_type, smooth
     # clip image
     imarray[:, :, :] = imarray.clip(min=0.0, max=1.0)
 
-    in_imarray[:] = imarray[:]
+    image[:] = imarray[:]
 
     if progress is not None:
         progress.update(8)
 
-    if shm_imarray is not None:
-        shm_imarray.close()
-        shm_imarray.unlink()
+    if shm_image is not None:
+        shm_image.close()
+        shm_image.unlink()
     if shm_background is not None:
         background = np.copy(background)
         shm_background.close()
@@ -202,7 +189,6 @@ def calc_mode_dataset(data, x_sub, y_sub, halfsize):
 
 
 def interpol(shm_imarray_name, shm_background_name, c, x_sub, y_sub, shape, kind, smoothing, downscale_factor, sample_size, RBF_kernel, spline_order, dtype, logging_queue, logging_configurer):
-
     logging_configurer(logging_queue)
     logging.info("background_extraction.interpol started")
 
@@ -279,7 +265,7 @@ def interpol(shm_imarray_name, shm_background_name, c, x_sub, y_sub, shape, kind
             return
 
         if downscale_factor != 1:
-            result = cv2.resize(src=result, dsize=(shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+            result = cv.resize(src=result, dsize=(shape[1], shape[0]), interpolation=cv.INTER_LINEAR)
 
         background[:, :, c] = result
     except Exception as e:

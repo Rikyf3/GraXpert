@@ -9,6 +9,7 @@ import numpy as np
 from graxpert.app_state import INITIAL_STATE, AppState
 from graxpert.background_grid_selection import background_grid_selection
 from graxpert.background_flood_selection import background_flood_selection
+from graxpert.background_auto_sample import background_intelligent_selection
 
 
 class ICommandHandler(ABC):
@@ -181,6 +182,22 @@ class SelectPointsHandler(PointHandler):
     def progress(self) -> float:
         return 1.0
 
+
+class AutomaticPointsHandler(PointHandler):
+    def execute(self, app_state: AppState, cmd_args: Dict) -> AppState:
+        app_state_copy = deepcopy(app_state)
+        data = cmd_args["data"]
+        tol = cmd_args["tol"]
+        num_pts = cmd_args["num_pts"]
+        sample_size = cmd_args["sample_size"]
+        automatic_points = background_intelligent_selection(data, num_pts, tol, sample_size)
+        app_state_copy.background_points = automatic_points
+        return app_state_copy
+
+    def progress(self) -> float:
+        return 1.0
+
+
 class ResetPointsHandler(PointHandler):
     def execute(self, app_state: AppState, cmd_args: Dict) -> AppState:
         app_state_copy = deepcopy(app_state)
@@ -197,4 +214,5 @@ ADD_POINTS_HANDLER = AddPointsHandler()
 RM_POINT_HANDLER = RemovePointHandler()
 MOVE_POINT_HANDLER = MovePointHandler()
 SEL_POINTS_HANDLER = SelectPointsHandler()
+AUTO_POINTS_HANDLER = AutomaticPointsHandler()
 RESET_POINTS_HANDLER = ResetPointsHandler()

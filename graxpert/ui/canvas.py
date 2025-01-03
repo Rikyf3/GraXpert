@@ -128,6 +128,9 @@ class Canvas(CTkFrame):
         eventbus.add_listener(UiEvents.TURN_ON_CROP_MODE, self.on_turn_on_crop_mode)
         eventbus.add_listener(UiEvents.TURN_OFF_CROP_MODE, self.on_turn_off_crop_mode)
         eventbus.add_listener(UiEvents.APPLY_CROP_REQUEST, self.on_apply_crop_request)
+        eventbus.add_listener(AppEvents.AI_BATCH_SIZE_CALCULATION_PROGRESS, self.on_ai_batch_size_calculation_progress)
+        eventbus.add_listener(AppEvents.AI_BATCH_SIZE_CALCULATION_BEGIN, self.on_ai_batch_size_calculation_begin)
+        eventbus.add_listener(AppEvents.AI_BATCH_SIZE_CALCULATION_END, self.on_ai_batch_size_calculation_end)
 
     # event handling
     def on_ai_download_begin(self, event=None):
@@ -556,3 +559,17 @@ class Canvas(CTkFrame):
 
         graxpert.scale(scale)
         graxpert.translate(offsetx, offsety)
+
+    def on_ai_batch_size_calculation_progress(self, event=None):
+        self.dynamic_progress_frame.update_progress(event["progress"])
+
+    def on_ai_batch_size_calculation_begin(self, event=None):
+        self.dynamic_progress_frame.text.set(_("Calculating best batch size"))
+        self.dynamic_progress_frame.cancellable = True
+        self.show_progress_frame(True)
+
+    def on_ai_batch_size_calculation_end(self, event=None):
+        self.dynamic_progress_frame.cancellable = False
+        self.dynamic_progress_frame.text.set("")
+        self.dynamic_progress_frame.variable.set(0.0)
+        self.show_progress_frame(False)
