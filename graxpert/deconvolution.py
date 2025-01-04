@@ -1,38 +1,32 @@
-import copy
 import logging
+import cv2 as cv
 import numpy as np
-import onnxruntime as ort
+
+from astropy.io import fits
 
 from graxpert.ai_model_handling import InferenceEngine
-from graxpert.application.app_events import AppEvents
-from graxpert.application.eventbus import eventbus
 
 
 class LogNorm:
-    def __init__(self, epsilon=1e-2):
+    def __init__(self, epsilon=1e-5):
         self.epsilon = epsilon
 
     def normalize(self, patches):
-        # patches : [num, channels, patch_size, patch_size]
-        norm_params = np.empty((patches.shape[0], 3, patches.shape[1], 1, 1), dtype=np.float32)
-
-        _min = np.min(patches, axis=(2, 3), keepdims=True)
+        # patches : [-1, patch_size, patch_size, c]
+        _min = np.min(patches, axis=(1, 2), keepdims=True)
 
         patches = np.log(patches - _min + self.epsilon)
 
-        _mean = np.mean(patches, axis=(2, 3), keepdims=True)
-        _std = np.std(patches, axis=(2, 3), keepdims=True)
+        _mean = np.mean(patches, axis=(1, 2), keepdims=True)
+        _std = np.std(patches, axis=(1, 2), keepdims=True)
 
         patches = (patches - _mean) / _std * 0.1
 
-        norm_params[:, 0] = _mean
-        norm_params[:, 1] = _std
-        norm_params[:, 2] = _min
-
-        return patches, norm_params
+        return patches, (_mean, _std, _min)
     
     def denormalize(self, patches, norm_params):
-        _mean, _std, _min = norm_params[:, 0], norm_params[:, 1], norm_params[:, 2]
+        # patches : [-1, patch_size, patch_size, c]
+        _mean, _std, _min = norm_params
         
         patches = patches * _std / 0.1 + _mean
         
@@ -43,8 +37,8 @@ class LogNorm:
 
 class ParamsNorm:
     def normalize(self, params, model_type=None):
-        params[:, 0] = params[:, 0] * 0.95
-        
+        params[:, 0] = np.clip(params[:, 0], 0.05, 0.95)
+
         if "stars" in model_type:
             params[:, 1] = np.clip((params[:, 1] / 2.355 - 1.5) / 3.0, 0.05, 0.95)
         else:
@@ -54,13 +48,17 @@ class ParamsNorm:
 
 
 normalization_dict = {
-    "1.0" : (LogNorm(epsilon=1e-2), ParamsNorm(), {"patch_size": 512, "stride": 448, "channels": 1, "residuals": True, "channel_last": False}),
+    "1.0" : (LogNorm(epsilon=1e-5), ParamsNorm(), {"patch_size": 512, "stride": 448, "channels": 1, "residuals": True, "channel_last": False}),
 }
 
 
-# TODO : Add events star and end
 def deconvolve(image, ai_path, params, prefs, progress=None):
     logging.info("Starting deconvolution")
+
+    if prefs.deconvolution_apply_luminance_only:
+        if image.shape[-1] == 3:
+            image_lab = cv.cvtColor(image, cv.COLOR_RGB2Lab)
+            image = image_lab[:, :, 0:1]
 
     engine = InferenceEngine(
         model_path=ai_path,
@@ -71,6 +69,10 @@ def deconvolve(image, ai_path, params, prefs, progress=None):
     engine.load_normalization(normalization_dict)
 
     output = engine.execute(image, params, progress)
+
+    if prefs.deconvolution_apply_luminance_only:
+        image_lab[:, :, 0] = output
+        output = cv.cvtColor(image_lab, cv.COLOR_Lab2RGB)
 
     engine.cleanup()
 

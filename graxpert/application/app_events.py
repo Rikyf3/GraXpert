@@ -81,6 +81,7 @@ class AppEvents(Enum):
     # denoise ai model handling
     DECONVOLUTION_OBJECT_AI_VERSION_CHANGED = auto()
     DECONVOLUTION_STARS_AI_VERSION_CHANGED = auto()
+    DECONVOLUTION_APPLY_LUMINANCE_ONLY_CHANGED = auto()
     # denoise ai model handling
     DENOISE_AI_VERSION_CHANGED = auto()
     # advanced settings

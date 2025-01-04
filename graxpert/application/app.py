@@ -261,6 +261,9 @@ class GraXpert:
     def on_deconvolution_psfsize_changed(self, event):
         self.prefs.deconvolution_psfsize = event["deconvolution_psfsize"]
 
+    def on_deconvolution_apply_luminance_only_changed(self, event):
+        self.prefs.deconvolution_apply_luminance_only = event["deconvolution_apply_luminance_only"]
+
     def on_deconvolution_object_ai_version_changed(self, event):
         self.prefs.deconvolution_object_ai_version = event["deconvolution_object_ai_version"]
 
@@ -283,7 +286,7 @@ class GraXpert:
 
         try:
             # Get base image to process
-            img_array_to_be_processed = self.get_base_image_for_step("deconvolution")
+            img_array_to_be_processed = self.get_base_image_for_step(f"deconvolution_{deconvolution_type_option}")
 
             self.prefs.images_linked_option = True
 
@@ -302,7 +305,6 @@ class GraXpert:
             )
 
             if imarray is not None:
-
                 deconvolved = AstroImage()
                 deconvolved.set_from_array(imarray)
 
@@ -317,9 +319,9 @@ class GraXpert:
                 self.images.stretch_all(StretchParameters(self.prefs.stretch_option, self.prefs.channels_linked_option, self.prefs.images_linked_option), self.prefs.saturation)
 
                 # Update processing chain
-                if "deconvolution" in self.processing_chain:
-                    self.processing_chain.remove("deconvolution")
-                self.processing_chain.append("deconvolution")
+                if f"deconvolution_{deconvolution_type_option}" in self.processing_chain:
+                    self.processing_chain.remove(f"deconvolution_{deconvolution_type_option}")
+                self.processing_chain.append(f"deconvolution_{deconvolution_type_option}")
 
                 eventbus.emit(AppEvents.DECONVOLUTION_SUCCESS, {"deconvolution_type_option": f"Deconvolved {deconvolution_type_option}"})
                 eventbus.emit(AppEvents.UPDATE_DISPLAY_TYPE_REEQUEST, {"display_type": f"Deconvolved {deconvolution_type_option}"})
@@ -515,7 +517,7 @@ class GraXpert:
                 suffix_2 = "_obj_decon"
             case ImageTypes.Deconvolved_Stars_only:
                 suffix_2 = "_stars_decon"
-            case ImageTypes.Deconvolved_Stars_only:
+            case ImageTypes.Denoised:
                 suffix_2 = "_denoised"
             case _:
                 suffix_2 = ""
@@ -789,8 +791,8 @@ class GraXpert:
         """Convert processing step name to ImageTypes enum"""
         step_map = {
             "background": ImageTypes.Gradient_Corrected,
-            "deconvolution": ImageTypes.Deconvolved_Object_only if self.prefs.deconvolution_type_option == "Object-only" 
-                           else ImageTypes.Deconvolved_Stars_only,
+            "deconvolution_Object-only": ImageTypes.Deconvolved_Object_only,
+            "deconvolution_Stars-only": ImageTypes.Deconvolved_Stars_only,
             "denoise": ImageTypes.Denoised
         }
         return step_map.get(step, ImageTypes.Original)

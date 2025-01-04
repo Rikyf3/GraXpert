@@ -42,6 +42,7 @@ class Prefs:
     deconvolution_type_option: AnyStr = "Object-only"
     deconvolution_object_ai_version: AnyStr = None
     deconvolution_stars_ai_version: AnyStr = None
+    deconvolution_apply_luminance_only: bool = False
     denoise_ai_version: AnyStr = None
     graxpert_version: AnyStr = graxpert_version
     deconvolution_strength: float = 0.5

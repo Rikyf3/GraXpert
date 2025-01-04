@@ -246,7 +246,6 @@ class InferenceEngine:
         self.residuals = normalization_dict[version_key][2].get("residuals")
         self.channel_last = normalization_dict[version_key][2].get("channel_last")
 
-    # TODO : finish it
     def calc_best_batch_size(self, num_patches, progress=None, batch_sizes=[1, 2, 4, 8, 16]):
         cancel_flag = False
         def cancel_listener(event):
@@ -327,16 +326,22 @@ class InferenceEngine:
 
         patches = np.lib.stride_tricks.sliding_window_view(
             padded_image,
-            (self.patch_size, self.patch_size, self.channels)
-        )[::self.stride, ::self.stride] #[num_h, num_w, num_c, patch_size, patch_size, 1]
-        patches = patches.reshape(-1, self.patch_size, self.patch_size, self.channels)
-        patches = np.moveaxis(patches, -1, 1)
-        total_patches = patches.shape[0]
+            (self.patch_size, self.patch_size, c)
+        )[::self.stride, ::self.stride, 0] 
+        patches = patches.reshape(-1, self.patch_size, self.patch_size, c)  #[num_patches, patch_size, patch_size, c]
 
         patches, norm_params = self.model_normalization.normalize(patches)
+
+        patches = np.moveaxis(patches, -1, 1)   #[num_patches, c, patch_size, patch_size]
+        total_patches = patches.shape[0] * (c // self.channels)
+        patches = patches.reshape(total_patches, self.channels, self.patch_size, self.patch_size)   #[total_patches, channels, patch_size, patch_size]
+
+        if self.channel_last:
+            patches = np.moveaxis(patches, 1, -1)
         
         if params is not None:
             params = self.params_normalization.normalize(params, model_type=self.model_type)
+
             if params.shape[0] == 1:
                 params = np.repeat(params, total_patches, axis=0)
 
@@ -346,19 +351,12 @@ class InferenceEngine:
                 logging.info("AI Inference cancelled")
                 eventbus.remove_listener(AppEvents.CANCEL_PROCESSING, cancel_listener)
                 return None
-
-            batch_patches = patches[idx:idx+self.batch_size]
-            if self.channel_last:
-                batch_patches = np.moveaxis(batch_patches, 1, -1)
             
-            model_inputs = {"gen_input_image": batch_patches}
+            model_inputs = {"gen_input_image": patches[idx:idx+self.batch_size]}
             if params is not None:
                 model_inputs["params"] = params[idx:idx+self.batch_size]
             
             output = self.model.run(None, model_inputs)[0]
-            
-            if self.channel_last:
-                output = np.moveaxis(output, -1, 1)
 
             if self.residuals:
                 patches[idx:idx+self.batch_size] = patches[idx:idx+self.batch_size] - output
@@ -373,14 +371,16 @@ class InferenceEngine:
                     logging.info(f"Progress: {p}%")
                 last_progress = p
 
+        if self.channel_last:
+            patches = np.moveaxis(patches, -1, 1)   #[total_patches, channels, patch_size, patch_size]
+        
+        patches = patches.reshape(total_patches // (c // self.channels), c, self.patch_size, self.patch_size)
+        patches = np.moveaxis(patches, 1, -1)   #[num_patches, self.patch_size, self.patch_size, c]
+
         patches = self.model_normalization.denormalize(patches, norm_params)
 
-        # TODO : do I really need to do all of this?
-        patches = np.moveaxis(patches, 1, -1)
-        patches = patches.reshape(num_h, num_w, -1, self.patch_size, self.patch_size, self.channels)
-        patches = np.moveaxis(patches, 2, -1)
-        patches = patches.reshape(num_h, num_w, self.patch_size, self.patch_size, -1)
-
+        patches = patches.reshape(num_h, num_w, self.patch_size, self.patch_size, c)
+        
         reconstructed_image = np.zeros((new_h, new_w, c), dtype=np.float32)
         weights = np.zeros((new_h, new_w, c), dtype=np.float32)
 

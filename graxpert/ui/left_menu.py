@@ -243,6 +243,10 @@ class DeconvolutionMenu(CollapsibleMenuFrame):
         self.deconvolution_psfsize.set(graxpert.prefs.deconvolution_psfsize)
         self.deconvolution_psfsize.trace_add("write", lambda a, b, c: eventbus.emit(AppEvents.DECONVOLUTION_PSFSIZE_CHANGED, {"deconvolution_psfsize": self.deconvolution_psfsize.get()}))
 
+        self.deconvolution_apply_luminance_only = tk.BooleanVar()
+        self.deconvolution_apply_luminance_only.set(graxpert.prefs.deconvolution_apply_luminance_only)
+        self.deconvolution_apply_luminance_only.trace_add("write", lambda a, b, c: eventbus.emit(AppEvents.DECONVOLUTION_APPLY_LUMINANCE_ONLY_CHANGED, {"deconvolution_apply_luminance_only": self.deconvolution_apply_luminance_only.get()}))
+
         self.create_children()
         self.setup_layout()
         self.place_children()
@@ -277,6 +281,9 @@ class DeconvolutionMenu(CollapsibleMenuFrame):
         )
         tooltip.Tooltip(self.deconvolution_psfsize_slider, text=tooltip.deconvolution_psfsize_text)
 
+        self.deconvolution_apply_luminance_only_checkbox = GraXpertCheckbox(self.sub_frame, width=default_label_width, text=_("Apply to luminance only"), variable=self.deconvolution_apply_luminance_only)
+        tooltip.Tooltip(self.deconvolution_apply_luminance_only_checkbox, text=tooltip.deconvolution_apply_luminance_only_text)
+
     def setup_layout(self):
         super().setup_layout()
 
@@ -296,6 +303,7 @@ class DeconvolutionMenu(CollapsibleMenuFrame):
 
         self.deconvolution_strength_slider.grid(column=1, row=next_row(), pady=pady, sticky=tk.EW)
         self.deconvolution_psfsize_slider.grid(column=1, row=next_row(), pady=pady, sticky=tk.EW)
+        self.deconvolution_apply_luminance_only_checkbox.grid(column=1, row=next_row(), pady=pady, sticky=tk.EW)
         self.deconvolution_button.grid(column=1, row=next_row(), pady=pady, sticky=tk.EW)
 
     def toggle(self):

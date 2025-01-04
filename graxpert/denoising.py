@@ -21,7 +21,6 @@ class MedianNorm:
 
         _median = np.median(patches, axis=(0, 2, 3), keepdims=True)
         _mad = np.median(np.abs(patches - _median), axis=(0, 2, 3), keepdims=True)
-
         patches = (patches - _median) / _mad * 0.04
         patches = np.clip(patches, -self.model_threshold, self.model_threshold)
 
@@ -63,6 +62,8 @@ def denoise(image, ai_path, prefs, progress=None):
     num_channels = image.shape[-1]
     if num_channels == 1:
         image_channels_normalized = np.repeat(image, 3, axis=-1)
+    else:
+        image_channels_normalized = image
     
     engine = InferenceEngine(
         model_path=ai_path,
