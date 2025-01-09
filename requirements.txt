@@ -11,3 +11,4 @@ requests
 scikit-image == 0.21.0
 scipy
 xisf
+auto_stretch

@@ -98,10 +98,15 @@ def extract_background(image, ai_path, background_points, downscale_factor, prog
 
         if num_channels == 1:
             background = np.mean(background, axis=-1, keepdims=True)
+            imarray = imarray[:, :, 0:1]
 
         background = cv.GaussianBlur(background, ksize=gaussian_kernel(sigma=20 * prefs.smoothing_option + 3), sigmaX=20 * prefs.smoothing_option + 3)
 
         background = cv.resize(background, dsize=(imarray.shape[1], imarray.shape[0]), interpolation=cv.INTER_LINEAR)
+
+        if len(background.shape) == 2:
+            background = np.expand_dims(background, axis=-1)
+        
     else:
         shm_image = shared_memory.SharedMemory(create=True, size=image.nbytes)
         shm_background = shared_memory.SharedMemory(create=True, size=image.nbytes)
